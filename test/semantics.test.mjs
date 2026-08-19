@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { cdom, mod, dom, host } from "./_setup.mjs";
 
-const { div, span, input } = cdom.elements;
+const { div, span, input, a, img, p: para } = cdom.elements;
 const { appendInner, clearInner } = mod;
 
 test("null and undefined attribute values remove the attribute", () => {
@@ -116,7 +116,7 @@ test("clearInner empties an element and returns it", () => {
 });
 
 test("misused arguments throw an actionable error", () => {
-	assert.throws(() => div([1, 2]), /array/i);
+	assert.throws(() => div([1, 2]), /non-empty array/i);
 	assert.throws(() => div(dom.window.document.createTextNode("x"), () => {}), /Node/);
 	assert.throws(() => div({ onclick: "alert(1)" }), /non-function/);
 	assert.throws(() => div({ title: () => {} }), /Got function/);
@@ -154,4 +154,61 @@ test("event listeners attach, and null listeners are skipped", () => {
 
 test("svg elements use the svg namespace", () => {
 	assert.equal(cdom.svgElements.circle({ r: "1" }).namespaceURI, "http://www.w3.org/2000/svg");
+});
+
+test("href and src follow the same absent-value rule as any other attribute", () => {
+	// Named separately because both have live cas surfaces: navbar and homepage tiles
+	// build anchors as a({href: tile.href}), and an absent href now means the anchor
+	// no longer matches `a[href]`, is not focusable, and loses link styling.
+	assert.equal(a({ href: undefined }).outerHTML, "<a></a>");
+	assert.equal(a({ href: null }).hasAttribute("href"), false);
+	assert.equal(a({ href: "/x" }).getAttribute("href"), "/x");
+	assert.equal(img({ src: null }).hasAttribute("src"), false);
+	assert.equal(img({ src: "/i.png" }).getAttribute("src"), "/i.png");
+});
+
+test("style is written as the element's inline style", () => {
+	const el = div({ style: "color: red" });
+	assert.equal(el.style.color, "red");
+	assert.equal(el.style.length, 1);
+});
+
+test("an empty array renders an empty container", () => {
+	// This used to work and briefly regressed to a throw. Only a NON-empty array is
+	// an error, and that one threw before too, just with a nonsense message.
+	assert.equal(div([]).outerHTML, "<div></div>");
+	assert.equal(div({ id: "z" }, []).outerHTML, '<div id="z"></div>');
+	const h = host();
+	h.innerHTML = "<b>old</b>";
+	cdom.replaceInner(h, []);
+	assert.equal(h.innerHTML, "");
+});
+
+test("replaceInner clears the host before appending", () => {
+	const h = host();
+	h.innerHTML = "<b>old</b><i>stuff</i>";
+	cdom.replaceInner(h, () => para("new"));
+	assert.equal(h.innerHTML, "<p>new</p>");
+});
+
+test("a render callback that throws still restores the parent", () => {
+	// handleNodeInner's `finally` is the invariant the whole builder rests on. Without
+	// it, everything created later in the frame lands in the wrong container.
+	const h = host();
+	cdom.replaceInner(h, () => {
+		para("outer");
+		try {
+			span(() => {
+				para("inner");
+				throw new Error("boom");
+			});
+		} catch {
+			/* the caller handles it; cdom must still have restored the parent */
+		}
+		para("after");
+	});
+	assert.equal(h.innerHTML, "<p>outer</p><span><p>inner</p></span><p>after</p>");
+
+	// And the top-level context is back to detached, not left pointing at h.
+	assert.equal(div("later").parentNode, null);
 });
