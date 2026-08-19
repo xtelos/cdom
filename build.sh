@@ -1,3 +1,4 @@
 #!/bin/sh
-tsc --project tsconfig.production.json
-terser --compress --mangle --output ./dist/cdom.min.js -- ./dist/cdom.js
+set -e
+npx --yes tsc --project tsconfig.production.json
+npx --yes terser --compress --mangle --output ./dist/cdom.min.js -- ./dist/cdom.js

@@ -4,14 +4,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-CDOM is a 208-line, zero-dependency TypeScript library that builds DOM trees from nested closures.
+CDOM is a zero-dependency TypeScript library that builds DOM trees from nested closures.
 All of the source is `src/cdom.ts`; the shipped artifact is `dist/cdom.min.js`, a minified ES module
-with a default export. It is the rendering primitive under every modern page in the CAS web app.
+with a default export plus four named exports. It is the rendering primitive under every modern page
+in the CAS web app.
 
 The whole repo is small enough that this file is its map. The estate-level synthesis (provenance,
-consumer census, the vendoring contract, measured semantics) is
-`~/.claude/reference/cdom/cdom.md`, and the evidence behind it is
-`~/.claude/research/cdom-deep-dive-2026-08-19/`.
+consumer census, measured semantics) is `~/.claude/reference/cdom/cdom.md`, and the evidence behind
+it is `~/.claude/research/cdom-deep-dive-2026-08-19/`.
 
 ## Where this checkout pushes
 
@@ -20,46 +20,64 @@ read-only for us (`push: false`; a push there 403s naming the account, which is 
 gap, not a credential problem), so work lands on the fork and the org repo stays the frozen mirror it
 already was. `master` and `dev` both track `origin`. Both repos are public.
 
-## Read this before touching anything
+## Provenance
 
-**Neither this checkout's upstream nor the org repo is the source of truth for what production runs.**
+Commits `3862679`, `3fec200` and `32dec2d` are Ambrose Cavalier's from June 2021, and
+`newspapersystems/cdom` HEAD is the same SHA as upstream `AmbroseCavalier/cdom` HEAD. Everything
+after that is ours. Do not expect upstream to have fixes; it has not moved since 2021.
 
-- All three commits are Ambrose Cavalier's from June 2021. `newspapersystems/cdom` HEAD (`32dec2d`)
-  is the same SHA as upstream `AmbroseCavalier/cdom` HEAD. There are zero Newspaper Systems commits.
-- What CAS actually loads is `cas/web_bs/static/3rdparty/cdom/cdom.min.js`. That file is this repo's
-  `dist/cdom.min.js` byte-for-byte, **plus a hand-appended, unminified NS patch** exporting
-  `stashStatePromise`, `stashStateFunction`, `clearInner`, `appendInner`.
-- **Rebuilding here and copying `dist/cdom.min.js` over the vendored file deletes those four
-  exports**, which ~50 CAS modules import. Nothing automates this and no test catches it. To ship a
-  library change: rebuild, commit both files here, copy the new base bytes into cas, **re-append the
-  NS tail**, then diff to prove the four exports survived.
-- The patch has to live inside the bundle: `stashStatePromise` assigns to `currentNode`, a
-  module-scoped binding with no exported setter, so a sibling module cannot do it.
-- cas's `.gitattributes` carries `*.min.js -diff`, so every change to the vendored copy shows up as
-  `Bin N -> M bytes` in `git show` and in PR review. Do not expect review to catch a mistake here.
+## The vendoring contract (this changed in v0.2.0, read it)
 
-## Build
+What CAS loads is `cas/web_bs/static/3rdparty/cdom/cdom.min.js`. **As of v0.2.0 that file is
+`dist/cdom.min.js` byte-for-byte, and nothing else.** Shipping a library change is now:
 
 ```sh
-./build.sh                                             # tsc, then terser, into ./dist
-npx tsc --noEmit --project tsconfig.production.json    # type-check only
+npm run verify                                          # typecheck + build + tests
+cp dist/cdom.min.js "$CAS/web_bs/static/3rdparty/cdom/cdom.min.js"
+cmp dist/cdom.min.js "$CAS/web_bs/static/3rdparty/cdom/cdom.min.js"   # must be silent
 ```
 
-- The build is **byte-reproducible** (verified 2026-08-19 with tsc 5.9.3 + terser 5.50.0: the
-  regenerated `dist/cdom.min.js` is identical to the committed one), so a byte diff against `dist/`
-  is a real signal.
-- `terser` is not installed globally on every box; `npx --yes terser ...` works.
+**Before v0.2.0 this was a trap**, and the history matters because the fix is only one commit deep:
+the vendored file used to be the built bundle *plus* a hand-appended, unminified tail defining
+`stashStatePromise`, `stashStateFunction`, `clearInner` and `appendInner`. Rebuilding and copying
+deleted all four, which ~50 cas modules import, and nothing caught it. Those four now live in
+`src/cdom.ts` and are covered by `test/vendoring.test.mjs`, so the build cannot silently lose them
+again. If you ever find a vendored copy that is larger than `dist/cdom.min.js`, someone has
+re-appended a tail and you are back in the old world.
+
+The patch had to live inside the bundle because `stashStatePromise` assigns to `currentNode`, a
+module-scoped binding with no exported setter, so a sibling module cannot do it. That is still true,
+which is why these are exports of this library rather than helpers in cas.
+
+cas's `.gitattributes` carries `*.min.js -diff`, so every change to the vendored copy shows up as
+`Bin N -> M bytes` in `git show` and in PR review. Do not expect review to catch a mistake here; the
+`cmp` above is the check that matters.
+
+## Build and test
+
+```sh
+npm install         # jsdom, terser, typescript, all pinned
+npm run verify      # typecheck, build, then the suite. Use this before shipping.
+npm run build       # tsc, then terser, into ./dist
+npm test            # node --test, against dist/cdom.min.js
+npm run typecheck   # tsc --noEmit
+```
+
+- The tests load **`dist/cdom.min.js`**, not the TypeScript source, so they exercise exactly the
+  bytes cas vendors. A source fix that does not survive minification fails the suite.
+- The build is **byte-reproducible** with the pinned tsc 5.9.3 + terser 5.50.0 (verified 2026-08-19),
+  so a byte diff against `dist/` is a real signal. The pins in `package.json` are what protect that;
+  do not float them casually.
 - Every commit touching `src/cdom.ts` must also commit the rebuilt `dist/cdom.min.js`.
-- `dist/cdom.js`, `dist/cdom.d.ts` and `dist/cdom.js.map` are build outputs that are neither tracked
-  nor gitignored (`.gitignore` lists only `built` and `test`), so never `git add -A` here.
-- No `package.json`, no tests, no linter, no CI. Verification is the type-check plus running it.
+- `dist/cdom.js`, `dist/cdom.d.ts` and `dist/cdom.js.map` are build intermediates and are gitignored.
+  Only `dist/cdom.min.js` is tracked.
+- No CI. `npm run verify` is the gate.
 - The version banner lives only in the `/*! ... */` block atop `src/cdom.ts`; terser preserves it
-  into the minified output. Bump it in the source, never in `dist/`.
+  into the minified output, and `test/vendoring.test.mjs` asserts it survived. Bump it in the source,
+  never in `dist/`.
 - Source style is hard tabs.
 
 ## Architecture: one module-global `currentNode`
-
-Everything follows from `src/cdom.ts:113`.
 
 - `addNode()` appends to `currentNode` **if there is one**, and returns the node either way.
 - `handleNodeInner()` sets `currentNode` to the new node, runs the caller's `inner` closure, and
@@ -71,51 +89,79 @@ Everything follows from `src/cdom.ts:113`.
   included. Losing that `finally` silently corrupts the tree for every later call in the frame.
 - Element factories are `Proxy` objects, so any tag name works at runtime and the compile-time
   surface comes purely from the casts to `HTMLElementTagNameMap` / `SVGElementTagNameMap`. Tag names
-  are lowercased. SVG goes through `createElementNS`.
-- Argument dispatch is by `typeof`, not arity: `(attrs)`, `(inner)`, `(attrs, inner)` and `()` are
-  told apart by `typeof a === "object"`.
+  are lowercased. SVG goes through `createElementNS`. The proxy answers `then` with `undefined` on
+  purpose, so `elements` is not mistaken for a thenable.
+- Argument dispatch is by shape, not arity: a lone plain object is attributes, and a lone Node,
+  function or primitive is inner content. Arrays and Nodes are never read as an attribute map.
 
 ## Measured semantics
 
-Probed against the shipped bundle under jsdom, not read off the source:
+Probed against the shipped bundle under jsdom, not read off the source. Every row is asserted in
+`test/semantics.test.mjs`.
 
 | Case | Result |
 |---|---|
 | top-level `div(...)` | returns element, `parentNode === null` |
 | `style: "color:red"` | written to `el.style.cssText`, replacing the whole inline style |
 | `hidden: true` / `disabled: false` | `hidden="true"` / attribute removed (the `booleanAttributes` list) |
-| `title: null` or `undefined` | attribute **present and empty** (`title=""`), not removed |
-| `value` / `checked` | set as JS properties, not attributes |
-| `div(null)` | `null` is `typeof "object"`, so it is read as the attrs map: an empty div |
-| `div(undefined)` | reads as "argument absent": an empty div |
-| `div(0)` / `div(false)` | render as text `0` / `false`; only `null` inner is skipped |
+| `title: null` or `undefined` | attribute **removed** |
+| `value` / `checked` | set as JS properties when the element has one, else as attributes (property names beat the boolean-attribute list) |
+| `checked: true` serialization | **no `checked` in `outerHTML`, and `defaultChecked` stays false**, so a re-parse of the markup and `form.reset()` both come back unchecked. `.checked`, `:checked` and `cloneNode` are unaffected |
+| `href: null` on an anchor | attribute removed, so the anchor is no longer focusable or keyboard-activatable |
+| `div(null)` / `div(undefined)` | empty div |
+| `div(0)` / `div(false)` | render as text `0` / `false` |
+| `div(someNode)` | the node is appended as content |
+| `div([a, b])` | throws; pass a callback that creates each child |
 | `onClick: fn` | `addEventListener("click", fn)`; `null`/`undefined` listeners are skipped |
 | `onclick: "alert(1)"` | throws `Got non-function for "onclick"` |
 | `title: () => {}` | throws `Got function for "title"` |
-| `cdom.html(str)` | `<template>` parse then append, **no sanitization**: trusted input only |
+| `cdom.html(str)` | `<template>` parse then append, returns the fragment, **no sanitization**: trusted input only |
 
-## The async edge (the reason the NS patch exists)
+## The async edge (the reason the NS exports exist)
 
 An `await` inside a content callback ends the synchronous closure, so `handleNodeInner`'s `finally`
-has already restored `currentNode` before the continuation runs.
+has already restored `currentNode` before the continuation runs. Nodes created after an unwrapped
+`await` are **not appended**; the element is returned detached, and **nothing reports it**.
 
-- **Measured: nodes created after an unwrapped `await` are silently dropped.** `currentNode` is null,
-  the append is skipped, the element is returned detached. Nothing throws, and nothing lands on
-  `document.body`.
-- `stashStatePromise(promise)` captures `currentNode`, restores it in a `.finally()` registered
-  before the caller's `await`, then queues a microtask that nulls it again.
-- **It buys back the parent for exactly one continuation turn.** A second unwrapped `await` later in
-  the same async function drops everything after it. Wrap every await whose continuation renders, not
-  just the first.
+- `stashStatePromise(promise)` captures `currentNode`, restores it when the promise settles (before
+  the caller's continuation runs), then releases it in a microtask.
+- **It releases to `null`, never to whatever `currentNode` happens to be at that moment.** This is
+  load-bearing and the mistake is easy to make: when two renders await the *same* promise their
+  release callbacks run in one microtask drain, so a "restore the previous value" release captures
+  the first render's node and writes it back permanently. Every later top-level build then silently
+  lands inside that first render's host. Different timers never produce the interleaving, so only a
+  shared promise catches it (`test/async.test.mjs`, "two renders awaiting the SAME promise").
+- **Wrap every await whose continuation renders.** Stashed awaits chain correctly: two in a row, a
+  loop of them, and a stash inside a nested element all render into the right parent. The stash
+  covers exactly **one** continuation, so a further unstashed hop, even a bare
+  `await Promise.resolve()`, lands past it and loses everything after.
+- **That drop cannot be detected from inside cdom, and v0.2.0 does not try.** A detector was built
+  and removed before shipping: with a module-global parent there is no way to tell "a node from a
+  continuation that lost its parent" from "an ordinary detached top-level build", which is the
+  documented top-level idiom. A global "is any async render in flight" flag fires on correct code
+  every time a page builds a detached element while any fetch is outstanding. Do not rebuild it
+  without a per-frame mechanism.
+- **Nothing may attach a handler to an `inner` callback's promise.** Doing so marks its rejection
+  handled, and an async render that throws then fails silently instead of surfacing through
+  `unhandledrejection`. `test/fixtures/throwing-render.mjs` guards this out of process, because
+  `node --test` claims `unhandledRejection` for itself.
+- `stashStateFunction(fn)` is the same thing for a function returning a promise. It had zero call
+  sites in cas as of 2026-08-19, and before v0.2.0 its `return await` wrapper added a hop that broke
+  it for any real (macrotask) async work.
+- `appendInner` is **synchronous** and returns the element. It used to be `async`, which meant every
+  `await appendInner(...)` was itself an unstashed await that dropped whatever came next.
 
 ## Consumers
 
 `cas` is the only one, in 135 files, loaded as a native ES module by relative path
 (`../static/3rdparty/cdom/cdom.min.js`); no bundler touches `web_bs/js`. Weight: `replaceInner` 244,
-`elements` 100 (destructured once per module), `text` 18, `html` 9, `node` 7, `svgElements` 0. Most
-page code should go through the `cdomModal` / `cdomPromiseModal` / `cdomConfirmModal` /
-`cdomAlertModal` wrappers in `cas/web_bs/js/general_utils.js` rather than raw builders.
+`elements` 100 (destructured once per module), `text` 18, `html` 9, `node` 7, `svgElements` 0,
+`stashStatePromise` 41, `appendInner` 1, `clearInner` 1, `stashStateFunction` 0. Most page code
+should go through the `cdomModal` / `cdomPromiseModal` / `cdomConfirmModal` / `cdomAlertModal`
+wrappers in `cas/web_bs/js/general_utils.js` rather than raw builders.
 
-**A green cas suite proves nothing about this library**: `cas/vitest.config.js` aliases
-`/.*cdom\.min\.js$/` to a no-op mock, which does not even carry `stashStatePromise`. Consumer-side
-detail: `cas/docs/maps/frontend-architecture.md` §2 and §10.
+**cas's main suite proves nothing about this library**: `cas/vitest.config.js` aliases
+`/.*cdom\.min\.js$/` to a no-op mock that does not even carry `stashStatePromise`. The suite that
+does load the real bundle is `cas/vitest.render.config.js` (`npm run test:render`). Run that one when
+changing this library, plus `npm run verify` here. Consumer-side detail:
+`cas/docs/maps/frontend-architecture.md` sections 2 and 10.
