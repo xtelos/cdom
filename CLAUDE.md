@@ -13,9 +13,16 @@ consumer census, the vendoring contract, measured semantics) is
 `~/.claude/reference/cdom/cdom.md`, and the evidence behind it is
 `~/.claude/research/cdom-deep-dive-2026-08-19/`.
 
+## Where this checkout pushes
+
+`origin` is **`xtelos/cdom`**, a fork; `upstream` is `newspapersystems/cdom`. The org repo is
+read-only for us (`push: false`; a push there 403s naming the account, which is a repo-permission
+gap, not a credential problem), so work lands on the fork and the org repo stays the frozen mirror it
+already was. `master` and `dev` both track `origin`. Both repos are public.
+
 ## Read this before touching anything
 
-**This repo is a frozen mirror, not the source of truth for what production runs.**
+**Neither this checkout's upstream nor the org repo is the source of truth for what production runs.**
 
 - All three commits are Ambrose Cavalier's from June 2021. `newspapersystems/cdom` HEAD (`32dec2d`)
   is the same SHA as upstream `AmbroseCavalier/cdom` HEAD. There are zero Newspaper Systems commits.
