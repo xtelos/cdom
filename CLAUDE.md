@@ -40,7 +40,7 @@ cmp dist/cdom.min.js "$CAS/web_bs/static/3rdparty/cdom/cdom.min.js"   # must be 
 **Before v0.2.0 this was a trap**, and the history matters because the fix is only one commit deep:
 the vendored file used to be the built bundle *plus* a hand-appended, unminified tail defining
 `stashStatePromise`, `stashStateFunction`, `clearInner` and `appendInner`. Rebuilding and copying
-deleted all four, which ~50 cas modules import, and nothing caught it. Those four now live in
+deleted all four, which 19 cas modules import, and nothing caught it. Those four now live in
 `src/cdom.ts` and are covered by `test/vendoring.test.mjs`, so the build cannot silently lose them
 again. If you ever find a vendored copy that is larger than `dist/cdom.min.js`, someone has
 re-appended a tail and you are back in the old world.
@@ -66,8 +66,10 @@ npm run typecheck   # tsc --noEmit
 - The tests load **`dist/cdom.min.js`**, not the TypeScript source, so they exercise exactly the
   bytes cas vendors. A source fix that does not survive minification fails the suite.
 - The build is **byte-reproducible** with the pinned tsc 5.9.3 + terser 5.50.0 (verified 2026-08-19),
-  so a byte diff against `dist/` is a real signal. The pins in `package.json` are what protect that;
-  do not float them casually.
+  so a byte diff against `dist/` is a real signal. `build.sh` runs `node_modules/.bin` directly and
+  fails if you have not run `npm install`, deliberately: `npx --yes` silently downloads the *latest*
+  tsc/terser when `node_modules` is absent, which would turn that byte diff into noise. The pins and
+  the committed `package-lock.json` are what protect it; do not float them casually.
 - Every commit touching `src/cdom.ts` must also commit the rebuilt `dist/cdom.min.js`.
 - `dist/cdom.js`, `dist/cdom.d.ts` and `dist/cdom.js.map` are build intermediates and are gitignored.
   Only `dist/cdom.min.js` is tracked.
@@ -105,12 +107,14 @@ Probed against the shipped bundle under jsdom, not read off the source. Every ro
 | `style: "color:red"` | written to `el.style.cssText`, replacing the whole inline style |
 | `hidden: true` / `disabled: false` | `hidden="true"` / attribute removed (the `booleanAttributes` list) |
 | `title: null` or `undefined` | attribute **removed** |
+| `href: null` / `src: undefined` | attribute **removed**, so an anchor stops matching `a[href]`, stops being focusable, and loses link styling. This has live cas surfaces (navbar and homepage tiles) |
 | `value` / `checked` | set as JS properties when the element has one, else as attributes (property names beat the boolean-attribute list) |
 | `checked: true` serialization | **no `checked` in `outerHTML`, and `defaultChecked` stays false**, so a re-parse of the markup and `form.reset()` both come back unchecked. `.checked`, `:checked` and `cloneNode` are unaffected |
 | `href: null` on an anchor | attribute removed, so the anchor is no longer focusable or keyboard-activatable |
 | `div(null)` / `div(undefined)` | empty div |
 | `div(0)` / `div(false)` | render as text `0` / `false` |
 | `div(someNode)` | the node is appended as content |
+| `div([])` | empty container |
 | `div([a, b])` | throws; pass a callback that creates each child |
 | `onClick: fn` | `addEventListener("click", fn)`; `null`/`undefined` listeners are skipped |
 | `onclick: "alert(1)"` | throws `Got non-function for "onclick"` |
@@ -135,6 +139,12 @@ has already restored `currentNode` before the continuation runs. Nodes created a
   loop of them, and a stash inside a nested element all render into the right parent. The stash
   covers exactly **one** continuation, so a further unstashed hop, even a bare
   `await Promise.resolve()`, lands past it and loses everything after.
+- **Two further leaks exist, both pre-existing and neither hit by any cas call site.** (a) An
+  unrelated plain `.then` on the same promise a render stashed lands in the window between restore
+  and release, so a top-level build inside that callback is silently adopted into the render's host.
+  (b) `await Promise.all([stashStatePromise(a), stashStatePromise(b)])` drops everything after the
+  await, because both release microtasks run before `Promise.all`'s continuation. **Write
+  `await stashStatePromise(Promise.all([a, b]))` instead**, which works.
 - **That drop cannot be detected from inside cdom, and v0.2.0 does not try.** A detector was built
   and removed before shipping: with a module-global parent there is no way to tell "a node from a
   continuation that lost its parent" from "an ordinary detached top-level build", which is the
@@ -153,15 +163,20 @@ has already restored `currentNode` before the continuation runs. Nodes created a
 
 ## Consumers
 
-`cas` is the only one, in 135 files, loaded as a native ES module by relative path
-(`../static/3rdparty/cdom/cdom.min.js`); no bundler touches `web_bs/js`. Weight: `replaceInner` 244,
-`elements` 100 (destructured once per module), `text` 18, `html` 9, `node` 7, `svgElements` 0,
-`stashStatePromise` 41, `appendInner` 1, `clearInner` 1, `stashStateFunction` 0. Most page code
-should go through the `cdomModal` / `cdomPromiseModal` / `cdomConfirmModal` / `cdomAlertModal`
-wrappers in `cas/web_bs/js/general_utils.js` rather than raw builders.
+`cas` is the only one. **61 of its 163 `web_bs/js` files** import the bundle, as a native ES module
+by relative path (`../static/3rdparty/cdom/cdom.min.js`); no bundler touches `web_bs/js`. Weight
+(measured 2026-08-19, call sites unless noted): `replaceInner` 163, `elements` destructured once per
+module, `stashStatePromise` 41 across 17 files, `text`, `html` and `node` in single digits,
+`svgElements` 0, `clearInner` 1, `appendInner` 1, `stashStateFunction` **0**. Only 19 files use any
+of the four formerly-appended exports. Most page code should go through the `cdomModal` /
+`cdomPromiseModal` / `cdomConfirmModal` / `cdomAlertModal` wrappers in
+`cas/web_bs/js/general_utils.js` rather than raw builders.
 
 **cas's main suite proves nothing about this library**: `cas/vitest.config.js` aliases
 `/.*cdom\.min\.js$/` to a no-op mock that does not even carry `stashStatePromise`. The suite that
-does load the real bundle is `cas/vitest.render.config.js` (`npm run test:render`). Run that one when
-changing this library, plus `npm run verify` here. Consumer-side detail:
+does load the real bundle is `cas/vitest.render.config.js` (`npm run test:render`), and **as of
+2026-08-19 it exists only on the unmerged `track-modernization` branch**, not on `dev` or `master`
+(cas#974 merged into that branch, not into dev). Until it lands, running it means checking out that
+branch and dropping the bundle in; `npm run test:render` on `dev` is `Missing script`. So the real
+consumer-side gate today is `npm run verify` here plus a browser. Consumer-side detail:
 `cas/docs/maps/frontend-architecture.md` sections 2 and 10.
