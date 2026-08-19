@@ -16,7 +16,12 @@ async function render(fn) {
 	let done;
 	const finished = new Promise((r) => (done = r));
 	cdom.replaceInner(h, () => fn(h, done));
-	await finished;
+	// Bounded: `node --test` has no default timeout, so a regression that stops calling
+	// the inner callback would hang the suite instead of failing it.
+	const timeout = new Promise((_, reject) =>
+		setTimeout(() => reject(new Error("render never reached done()")), 5000).unref()
+	);
+	await Promise.race([finished, timeout]);
 	return h;
 }
 

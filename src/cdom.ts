@@ -169,7 +169,13 @@ function handleNodeInner<T extends Node>(node: T, inner: InnerDescriptor | null)
 		} else if (isNode(inner)) {
 			node.appendChild(inner);
 		} else if (Array.isArray(inner)) {
-			throw new Error("Got an array for inner content. Pass a callback that creates each child instead.");
+			// An empty array has always rendered an empty container; keep that. A non-empty
+			// one used to be read as an attribute map and died on a nonsense attribute name.
+			if (inner.length > 0) {
+				throw new Error(
+					"Got a non-empty array for inner content. Pass a callback that creates each child instead."
+				);
+			}
 		} else {
 			node.appendChild(document.createTextNode(stringifyForInner(inner)));
 		}

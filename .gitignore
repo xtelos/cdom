@@ -1,6 +1,5 @@
 built
 node_modules
-package-lock.json
 
 # tsc intermediates; only dist/cdom.min.js is committed
 dist/cdom.js
