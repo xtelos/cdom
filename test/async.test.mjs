@@ -220,3 +220,73 @@ test("an ordinary top-level build stays detached while an async render is in fli
 	assert.equal(h.innerHTML, "<p>a</p><p>b</p>");
 	assert.equal(h.contains(midFlight), false);
 });
+
+/* ------------------------------------------------------------------------- *
+ * Documented async edges that had no test before the 2026-08-20 audit. All
+ * three are pinned rather than fixed: each is a consequence of the module-global
+ * parent, and each was re-probed against the shipped bundle before being written.
+ * ------------------------------------------------------------------------- */
+
+test("the prescribed Promise.all form renders; the naive one drops everything after", async () => {
+	// This is the workaround CLAUDE.md tells people to write, and it had no test.
+	const wrapped = await render(async (h, done) => {
+		p("start");
+		const [x, y] = await stashStatePromise(
+			Promise.all([sleep(2).then(() => "A"), sleep(4).then(() => "B")])
+		);
+		p(x + y);
+		done();
+	});
+	assert.equal(wrapped.innerHTML, "<p>start</p><p>AB</p>");
+
+	// And the form people reach for first: both release microtasks run before
+	// Promise.all's own continuation, so the stash is already spent by the time the
+	// caller resumes. Pinned so the warning in the docs cannot quietly become false.
+	const naive = await render(async (h, done) => {
+		p("start");
+		const [x, y] = await Promise.all([
+			stashStatePromise(sleep(2).then(() => "A")),
+			stashStatePromise(sleep(4).then(() => "B"))
+		]);
+		p(x + y);
+		done();
+	});
+	assert.equal(naive.innerHTML, "<p>start</p>", "the naive form must still be documented as broken");
+});
+
+test("an unrelated .then on a stashed promise runs inside the render's parent", async () => {
+	// Known leak, pre-existing, zero cas call sites. The release window between "put the
+	// parent back" and "let go of it" is a real microtask, and any other continuation
+	// registered on the same promise runs inside it. Reaction order is spec-deterministic:
+	// release, then the render's own continuation, then this one, then the null-ing hop.
+	const h = host();
+	const shared = sleep(5).then(() => "S");
+	let done;
+	const finished = new Promise((r) => (done = r));
+	let stray = null;
+
+	cdom.replaceInner(h, async () => {
+		p("s1");
+		await stashStatePromise(shared);
+		p("s2");
+		done();
+	});
+	shared.then(() => {
+		stray = div("built inside an unrelated then");
+	});
+
+	await finished;
+	await sleep(5);
+	assert.equal(h.innerHTML, "<p>s1</p><p>s2</p><div>built inside an unrelated then</div>");
+	assert.equal(stray.parentNode, h, "cdom cannot see this continuation; it is adopted");
+});
+
+test("a stashed promise nobody awaits rejects silently", async () => {
+	// The one open lead from the audit: cas/web_bs/js/db_maint.js calls EditDatabase
+	// fire-and-forget. Attaching a handler is how the stash observes settlement, and
+	// that is exactly what marks the rejection handled, so this cannot be fixed from
+	// inside cdom. Await the returned promise, or attach your own .catch.
+	const fixture = fileURLToPath(new URL("./fixtures/fire-and-forget-rejection.mjs", import.meta.url));
+	const { stdout } = await execFile(process.execPath, [fixture]);
+	assert.equal(stdout.trim(), "SEEN:control", `got: ${stdout.trim()}`);
+});

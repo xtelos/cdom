@@ -29,7 +29,17 @@ test("the bundle is a self-contained ES module with no imports", () => {
 	assert.doesNotMatch(src, /\brequire\s*\(/, "must not be CommonJS");
 });
 
-test("the version banner survives minification", () => {
+test("the version banner survives minification and matches package.json", () => {
 	const src = readFileSync(bundlePath, "utf8");
 	assert.match(src, /CDOM v\d+\.\d+\.\d+/, "terser must preserve the /*! banner");
+
+	// The banner is the artifact's only version marker, and nothing linked it to
+	// package.json, so a version bump with a stale banner shipped silently. cas reads
+	// the banner to know what it has vendored; it cannot read package.json.
+	const { version } = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+	assert.match(
+		src,
+		new RegExp(`CDOM v${version.replace(/\./g, "\\.")}\\b`),
+		`the /*! banner in src/cdom.ts must say v${version}, to match package.json`
+	);
 });

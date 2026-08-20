@@ -212,3 +212,262 @@ test("a render callback that throws still restores the parent", () => {
 	// And the top-level context is back to detached, not left pointing at h.
 	assert.equal(div("later").parentNode, null);
 });
+
+/* ------------------------------------------------------------------------- *
+ * Coverage the 2026-08-20 audit found missing. Two mutations passed the whole
+ * suite at 37/0 before these existed: gutting node() and text(), and deleting
+ * an entry from booleanAttributes.
+ * ------------------------------------------------------------------------- */
+
+test("node() appends into the current parent and returns the node", () => {
+	const h = host();
+	const made = dom.window.document.createElement("b");
+	let returned;
+	cdom.replaceInner(h, () => {
+		returned = cdom.node(made);
+	});
+	assert.equal(returned, made, "node() must return exactly what it was given");
+	assert.equal(h.innerHTML, "<b></b>");
+	assert.equal(made.parentNode, h);
+
+	// At top level it is returned and appended nowhere, like any other builder.
+	const loose = dom.window.document.createElement("i");
+	assert.equal(cdom.node(loose), loose);
+	assert.equal(loose.parentNode, null);
+});
+
+test("text() appends a text node, and stringifies the way inner content does", () => {
+	const h = host();
+	let returned;
+	cdom.replaceInner(h, () => {
+		returned = cdom.text("hi");
+	});
+	assert.equal(h.innerHTML, "hi");
+	assert.equal(returned.nodeType, 3, "must be a Text node");
+	assert.equal(returned.parentNode, h);
+
+	const h2 = host();
+	cdom.replaceInner(h2, () => {
+		cdom.text(0);
+		cdom.text(false);
+		cdom.text(null);
+		cdom.text(undefined);
+	});
+	assert.equal(h2.childNodes.length, 4, "null and undefined still make an (empty) text node");
+	assert.equal(h2.textContent, "0false");
+
+	// Unlike html(), text() is escaped. This is the safe way to put user data on a page.
+	const h3 = host();
+	cdom.replaceInner(h3, () => cdom.text("<b>&</b>"));
+	assert.equal(h3.innerHTML, "&lt;b&gt;&amp;&lt;/b&gt;");
+
+	assert.equal(cdom.text("x").parentNode, null);
+});
+
+// The full list as of v0.2.1. Duplicated here on purpose: the source list is not
+// exported, and before this test deleting an entry outright passed the suite.
+const BOOLEAN_ATTRIBUTES = [
+	"allowfullscreen", "async", "autofocus", "autoplay", "checked", "compact", "controls",
+	"declare", "default", "defaultchecked", "defaultmuted", "defaultselected", "defer",
+	"disabled", "formnovalidate", "hidden", "indeterminate", "inert", "ismap", "itemscope",
+	"loop", "multiple", "muted", "nohref", "noresize", "noshade", "novalidate", "nowrap",
+	"open", "pauseonexit", "readonly", "required", "reversed", "scoped", "seamless",
+	"selected", "sortable", "truespeed", "typemustmatch", "visible"
+];
+
+test("every boolean attribute writes true and removes on false", () => {
+	// A div has none of these as a JS property, so each one takes the attribute path.
+	for (const name of BOOLEAN_ATTRIBUTES) {
+		assert.equal(div({ [name]: true }).getAttribute(name), "true", `${name}: true`);
+		assert.equal(div({ [name]: false }).hasAttribute(name), false, `${name}: false`);
+		assert.equal(div({ [name]: 0 }).hasAttribute(name), false, `${name}: falsy`);
+	}
+	assert.equal(BOOLEAN_ATTRIBUTES.length, 40);
+});
+
+test("the boolean-attribute lookup is case-insensitive", () => {
+	// Every name in the loop above is already lowercase, so dropping the .toLowerCase()
+	// from the lookup passed the whole suite. An upper-case key is what HTML would
+	// lowercase on the way in, so it has to take the same branch.
+	assert.equal(div({ HIDDEN: true }).getAttribute("hidden"), "true");
+	assert.equal(div({ HIDDEN: false }).hasAttribute("hidden"), false);
+	assert.equal(div({ Disabled: false }).hasAttribute("disabled"), false);
+});
+
+test("a name outside the list keeps its literal value", () => {
+	// The counterpart to the loop above: "false" as a *string* is exactly what the DOM
+	// does with an unknown attribute, and is why the list has to be explicit. Naming
+	// several is the only guard against a name being ADDED to the list; the length
+	// assertion above pins this file's copy, not the source's.
+	assert.equal(div({ contenteditable: false }).getAttribute("contenteditable"), "false");
+	assert.equal(div({ draggable: false }).getAttribute("draggable"), "false");
+	assert.equal(div({ spellcheck: false }).getAttribute("spellcheck"), "false");
+	assert.equal(div({ translate: false }).getAttribute("translate"), "false");
+	// `enabled` was in the list and is not an HTML attribute or property at all, so it
+	// was a silent no-op. Removed in v0.2.1: junk you can see beats a no-op you cannot.
+	assert.equal(div({ enabled: false }).getAttribute("enabled"), "false");
+});
+
+test("style is the element's whole inline style, parsed by CSSOM", () => {
+	const el = div({ style: "color: red" });
+	assert.equal(el.style.color, "red");
+	assert.equal(el.style.length, 1);
+
+	// A CSS string is not a list of ";"-separated pairs: a semicolon appears inside a
+	// url(). Splitting on ";" and calling setProperty per piece (which is *merge*
+	// semantics, not replace) satisfies the two assertions above and mangles this one.
+	const withUrl = div({ style: "background-image: url(data:image/png;base64,AAAA); color: red" });
+	assert.equal(withUrl.style.length, 2);
+	assert.equal(withUrl.style.color, "red");
+	assert.match(withUrl.getAttribute("style"), /base64,AAAA/);
+
+	// An object used to coerce to "[object Object]" and leave the style empty.
+	assert.throws(() => div({ style: { color: "red" } }), /style/);
+	assert.throws(() => div({ style: 12 }), /style/);
+});
+
+/* ------------------------------------------------------------------------- *
+ * v0.2.1 fixes. Each row was probed against the v0.2.0 bundle first, so every
+ * assertion here is a behaviour that measurably changed.
+ * ------------------------------------------------------------------------- */
+
+test("indeterminate reaches the property instead of a dead attribute", () => {
+	// The only audit finding with a live consumer already working around it:
+	// cas/web_bs/js/prebuy_utils/classifications_picker.js sets it by hand afterwards.
+	const el = input({ type: "checkbox", indeterminate: true });
+	assert.equal(el.indeterminate, true);
+	assert.equal(el.hasAttribute("indeterminate"), false);
+	assert.equal(input({ type: "checkbox", indeterminate: false }).indeterminate, false);
+
+	// The other three property-only names in the same list.
+	assert.equal(input({ type: "checkbox", defaultChecked: true }).defaultChecked, true);
+	assert.equal(cdom.elements.option({ defaultSelected: true }).defaultSelected, true);
+	assert.equal(cdom.elements.audio({ defaultMuted: true }).defaultMuted, true);
+
+	// An element without the property still falls back to the attribute path.
+	assert.equal(div({ indeterminate: true }).getAttribute("indeterminate"), "true");
+});
+
+test("an attribute that merely starts with 'on' is not an event handler", () => {
+	// `startsWith("on")` with no event-name check threw on both of these.
+	assert.equal(div({ online: "yes" }).getAttribute("online"), "yes");
+	assert.equal(input({ once: true }).getAttribute("once"), "true");
+	assert.equal(div({ "data-onboarding": "x" }).getAttribute("data-onboarding"), "x");
+
+	// A real handler name with a non-function value is still a bug, not markup.
+	assert.throws(() => div({ onclick: "alert(1)" }), /non-function/);
+	assert.throws(() => div({ onClick: "alert(1)" }), /non-function/);
+
+	// And a function under any on* name is still a listener, custom events included.
+	let hits = 0;
+	const el = div({ onMyCustomEvent: () => hits++ });
+	el.dispatchEvent(new dom.window.Event("mycustomevent"));
+	assert.equal(hits, 1);
+});
+
+test("className is an alias for class", () => {
+	assert.equal(div({ className: "foo bar" }).getAttribute("class"), "foo bar");
+	assert.equal(div({ className: "foo bar" }).classList.contains("bar"), true);
+	assert.equal(div({ className: "x" }).hasAttribute("classname"), false);
+	assert.equal(div({ className: null }).hasAttribute("class"), false);
+	// The plain spelling is untouched.
+	assert.equal(div({ class: "z" }).getAttribute("class"), "z");
+});
+
+test("xlink:href lands in the XLink namespace", () => {
+	// Plain setAttribute puts it in no namespace, where an SVG renderer ignores it.
+	const use = cdom.svgElements.use({ "xlink:href": "#icon" });
+	assert.equal(use.attributes.length, 1);
+	assert.equal(use.attributes[0].namespaceURI, "http://www.w3.org/1999/xlink");
+	assert.equal(use.getAttributeNS("http://www.w3.org/1999/xlink", "href"), "#icon");
+	assert.equal(cdom.svgElements.use({ "xlink:href": null }).attributes.length, 0);
+});
+
+test("an absent value removes the attribute before any property is written", () => {
+	// value: null took the property path and wrote el.value = "", which on an <li> is
+	// the number 0 and pins the ordinal. No key at all leaves it auto-numbered, and
+	// that is what an absent value has to mean.
+	const li = cdom.elements.li({ value: null });
+	assert.equal(li.hasAttribute("value"), false);
+	assert.equal(li.outerHTML, "<li></li>");
+	assert.equal(cdom.elements.li({ value: 3 }).value, 3);
+
+	// Unchanged for the elements where value is a live string property.
+	assert.equal(input({ value: null }).value, "");
+	assert.equal(input({ value: "hi" }).value, "hi");
+	assert.equal(input({ type: "checkbox", checked: null }).checked, false);
+});
+
+test("undefined is accepted as the first of two arguments", () => {
+	// Building attrs conditionally is normal; div(undefined, fn) threw where
+	// div(null, fn) worked.
+	const attrs = undefined;
+	assert.equal(div(attrs, () => span("s")).outerHTML, "<div><span>s</span></div>");
+	assert.equal(div(undefined, "text").outerHTML, "<div>text</div>");
+	assert.equal(div(null, () => span("s")).outerHTML, "<div><span>s</span></div>");
+	// A Node or a primitive first is still an error worth naming.
+	assert.throws(() => div(dom.window.document.createTextNode("x"), () => {}), /Node/);
+	assert.throws(() => div("str", () => {}), /string/);
+});
+
+/* ------------------------------------------------------------------------- *
+ * Adversarial review of the v0.2.1 diff, 2026-08-20. Every case below was
+ * measured against both the v0.2.0 and the v0.2.1 bundle before being written.
+ * ------------------------------------------------------------------------- */
+
+test("an event-handler name is recognised whatever its case", () => {
+	// The gate was `attributeName.startsWith("on")` while the handler test lowercased,
+	// so an upper-case name fell through BOTH branches into setAttribute. HTML then
+	// lowercased it on the way in, which made ONCLICK: "alert(1)" a live inline
+	// handler. The mirror image was just as wrong: ONCLICK: fn threw.
+	assert.throws(() => div({ ONCLICK: "alert(1)" }), /non-function/);
+	assert.throws(() => div({ OnClick: "alert(1)" }), /non-function/);
+	assert.equal(div({ ONCLICK: null }).hasAttribute("onclick"), false);
+
+	for (const name of ["ONCLICK", "OnClick", "onClick", "onclick"]) {
+		let hits = 0;
+		const el = div({ [name]: () => hits++ });
+		el.dispatchEvent(new dom.window.Event("click"));
+		assert.equal(hits, 1, `${name} must attach a listener`);
+		assert.equal(el.hasAttribute("onclick"), false, `${name} must not write an attribute`);
+	}
+});
+
+test("an unrecognised on* name throws rather than becoming an attribute", () => {
+	// These are real handlers in a browser and absent from jsdom's element prototypes.
+	// Deciding by `name in el` made cdom write an inline handler attribute under a test
+	// runner for input that is a hard error in production, which is the wrong direction
+	// for a test environment to differ in. An unknown on* name defaults to throwing.
+	for (const name of [
+		"onanimationend",
+		"ontransitionend",
+		"onpointerdown",
+		"onfocusin",
+		"ongotpointercapture",
+		"onwhateverisnext"
+	]) {
+		assert.throws(() => div({ [name]: "alert(1)" }), /non-function/, name);
+		assert.equal(div({ [name]: null }).hasAttribute(name), false, name);
+	}
+
+	// The carve-out stays: these two are the on-prefixed names that are not handlers.
+	assert.equal(div({ online: "yes" }).getAttribute("online"), "yes");
+	assert.equal(input({ once: true }).getAttribute("once"), "true");
+	assert.equal(div({ ONLINE: "yes" }).getAttribute("online"), "yes");
+});
+
+test("an absent value changes <option> and <progress> too, not just <li>", () => {
+	// The reordering that fixed <li> reaches every element with a `value` property.
+	// The <option> row is the one to watch: a placeholder built as option({value: x})
+	// with x null now submits its own label instead of "". No cas call site does this,
+	// and passing "" explicitly is unchanged, but it is the shape of bug that gets
+	// diagnosed as a backend problem.
+	const opt = cdom.elements.option({ value: null }, "Any");
+	assert.equal(opt.outerHTML, "<option>Any</option>");
+	assert.equal(opt.value, "Any", "with no value attribute, <option> falls back to its text");
+	assert.equal(cdom.elements.option({ value: "" }, "Any").value, "");
+
+	// <progress> flips from a determinate zero bar to an animated indeterminate one.
+	assert.equal(cdom.elements.progress({ value: null }).hasAttribute("value"), false);
+	assert.equal(cdom.elements.progress({ value: 0 }).getAttribute("value"), "0");
+});
