@@ -73,7 +73,17 @@ npm run typecheck   # tsc --noEmit
 - Every commit touching `src/cdom.ts` must also commit the rebuilt `dist/cdom.min.js`.
 - `dist/cdom.js`, `dist/cdom.d.ts` and `dist/cdom.js.map` are build intermediates and are gitignored.
   Only `dist/cdom.min.js` is tracked.
-- No CI. `npm run verify` is the gate.
+- No CI. `npm run verify` is the gate, **and the gate is weaker than it looks.** Two mutations proved
+  it on 2026-08-20, each reproduced independently: gutting `node()` and `text()` (dropping their
+  `addNode` call) passes the whole chain at `# pass 37 / # fail 0`, because neither has a single
+  behavioural assertion; and `npm test` never rebuilds, so a `src/cdom.ts` edit is validated against
+  the **stale** `dist/`. Run `npm run verify`, never bare `npm test`, and do not quote a green run as
+  evidence a change works. Same class: 2 of the 41 `booleanAttributes` are tested, the prescribed-safe
+  `stashStatePromise(Promise.all([...]))` workaround appears in no test, and the "style replaces the
+  whole inline style" claim is unfalsifiable by its own test. Cheapest fix, worth doing before any
+  other cdom work: have `verify` end by rebuilding to a temp path and `cmp`-ing against the committed
+  `dist/cdom.min.js`, which covers both staleness and the otherwise unchecked byte-reproducibility
+  claim. Full evidence: `~/.claude/research/cdom-audit-2026-08-20/README.md`.
 - The version banner lives only in the `/*! ... */` block atop `src/cdom.ts`; terser preserves it
   into the minified output, and `test/vendoring.test.mjs` asserts it survived. Bump it in the source,
   never in `dist/`.
@@ -165,12 +175,20 @@ has already restored `currentNode` before the continuation runs. Nodes created a
 
 `cas` is the only one. **61 of its 163 `web_bs/js` files** import the bundle, as a native ES module
 by relative path (`../static/3rdparty/cdom/cdom.min.js`); no bundler touches `web_bs/js`. Weight
-(measured 2026-08-19, call sites unless noted): `replaceInner` 163, `elements` destructured once per
-module, `stashStatePromise` 41 across 17 files, `text`, `html` and `node` in single digits,
-`svgElements` 0, `clearInner` 1, `appendInner` 1, `stashStateFunction` **0**. Only 19 files use any
-of the four formerly-appended exports. Most page code should go through the `cdomModal` /
-`cdomPromiseModal` / `cdomConfirmModal` / `cdomAlertModal` wrappers in
-`cas/web_bs/js/general_utils.js` rather than raw builders.
+(re-measured 2026-08-20 against `origin/dev`, call sites unless noted): `replaceInner` 163,
+`elements` destructured once per module, `stashStatePromise` **24 across 14 files**, `text` 9,
+`html` 3, `node` 2, `svgElements` 0, `clearInner` 1, `appendInner` 1, `stashStateFunction` **0**.
+Only 19 files use any of the four formerly-appended exports.
+
+**Count these against a named branch or the number is meaningless.** The figures above are
+`origin/dev` (= `origin/master` for `web_bs/js`). The live `track-modernization` branch is 226 files
+and 243 `replaceInner` sites, so a count taken from whatever happens to be checked out reads as ~50%
+growth that is really just unmerged feature work. The `41 across 17 files` this line carried until
+2026-08-20 was wrong on every branch; `argus_impact stashStatePromise` gives 24 and is the check to
+run, since `stashStatePromise` is an indexed `js_function` and grep is blocked on it.
+
+Most page code should go through the `cdomModal` / `cdomPromiseModal` / `cdomConfirmModal` /
+`cdomAlertModal` wrappers in `cas/web_bs/js/general_utils.js` rather than raw builders.
 
 **cas's main suite proves nothing about this library**: `cas/vitest.config.js` aliases
 `/.*cdom\.min\.js$/` to a no-op mock that does not even carry `stashStatePromise`. The suite that
