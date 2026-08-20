@@ -32,7 +32,7 @@ What CAS loads is `cas/web_bs/static/3rdparty/cdom/cdom.min.js`. **As of v0.2.0 
 `dist/cdom.min.js` byte-for-byte, and nothing else.** Shipping a library change is now:
 
 ```sh
-npm run verify                                          # typecheck + build + tests
+npm run verify                                          # typecheck, build, tests, byte-check
 cp dist/cdom.min.js "$CAS/web_bs/static/3rdparty/cdom/cdom.min.js"
 cmp dist/cdom.min.js "$CAS/web_bs/static/3rdparty/cdom/cdom.min.js"   # must be silent
 ```
@@ -53,40 +53,60 @@ cas's `.gitattributes` carries `*.min.js -diff`, so every change to the vendored
 `Bin N -> M bytes` in `git show` and in PR review. Do not expect review to catch a mistake here; the
 `cmp` above is the check that matters.
 
+**v0.2.1 is built here and not yet vendored.** cas still loads v0.2.0, so every *(new in 0.2.1)* row
+in the semantics table below is true of this repo and not of a live page. Shipping it is the `cp` +
+`cmp` above plus a cas PR, and it wants a browser first: `indeterminate`, `xlink:href` and the
+`href: null` focusability rows are all jsdom-derived.
+
 ## Build and test
 
 ```sh
 npm install         # jsdom, terser, typescript, all pinned
-npm run verify      # typecheck, build, then the suite. Use this before shipping.
-npm run build       # tsc, then terser, into ./dist
-npm test            # node --test, against dist/cdom.min.js
-npm run typecheck   # tsc --noEmit
+npm run verify      # typecheck, build, suite, byte-check. Use this before shipping.
+npm run build       # tsc, then terser, into ./dist (or into $1, for check-dist.sh)
+npm test            # rebuilds first (pretest), then node --test against dist/cdom.min.js
+npm run check:dist  # rebuild to a temp dir and cmp against the committed dist/
+npm run typecheck   # tsc --noEmit, from node_modules/.bin, never a global tsc
 ```
 
 - The tests load **`dist/cdom.min.js`**, not the TypeScript source, so they exercise exactly the
   bytes cas vendors. A source fix that does not survive minification fails the suite.
-- The build is **byte-reproducible** with the pinned tsc 5.9.3 + terser 5.50.0 (verified 2026-08-19),
-  so a byte diff against `dist/` is a real signal. `build.sh` runs `node_modules/.bin` directly and
+- The build is **byte-reproducible** with the pinned tsc 5.9.3 + terser 5.50.0, and as of v0.2.1
+  `npm run check:dist` proves it on every verify instead of leaving it a claim. `build.sh` runs `node_modules/.bin` directly and
   fails if you have not run `npm install`, deliberately: `npx --yes` silently downloads the *latest*
   tsc/terser when `node_modules` is absent, which would turn that byte diff into noise. The pins and
   the committed `package-lock.json` are what protect it; do not float them casually.
 - Every commit touching `src/cdom.ts` must also commit the rebuilt `dist/cdom.min.js`.
-- `dist/cdom.js`, `dist/cdom.d.ts` and `dist/cdom.js.map` are build intermediates and are gitignored.
-  Only `dist/cdom.min.js` is tracked.
-- No CI. `npm run verify` is the gate, **and the gate is weaker than it looks.** Two mutations proved
-  it on 2026-08-20, each reproduced independently: gutting `node()` and `text()` (dropping their
-  `addNode` call) passes the whole chain at `# pass 37 / # fail 0`, because neither has a single
-  behavioural assertion; and `npm test` never rebuilds, so a `src/cdom.ts` edit is validated against
-  the **stale** `dist/`. Run `npm run verify`, never bare `npm test`, and do not quote a green run as
-  evidence a change works. Same class: 2 of the 41 `booleanAttributes` are tested, the prescribed-safe
-  `stashStatePromise(Promise.all([...]))` workaround appears in no test, and the "style replaces the
-  whole inline style" claim is unfalsifiable by its own test. Cheapest fix, worth doing before any
-  other cdom work: have `verify` end by rebuilding to a temp path and `cmp`-ing against the committed
-  `dist/cdom.min.js`, which covers both staleness and the otherwise unchecked byte-reproducibility
-  claim. Full evidence: `~/.claude/research/cdom-audit-2026-08-20/README.md`.
+- `dist/cdom.js` and `dist/cdom.js.map` are build intermediates and are gitignored. `dist/cdom.min.js`
+  **and `dist/cdom.d.ts`** are tracked: the bundle is what cas vendors, and the declarations are what
+  `package.json`'s `types` field points at. It pointed at a gitignored file until v0.2.1, so the
+  package shipped a types path that did not exist.
+- No CI. `npm run verify` is the gate, **and as of v0.2.1 it actually gates.** It was a false green
+  until 2026-08-20, proved by two mutations: gutting `node()` and `text()` passed the whole chain at
+  `# pass 37 / # fail 0` because neither had a behavioural assertion, and `npm test` never rebuilt, so
+  a `src/cdom.ts` edit was validated against the **stale** `dist/`. Both are closed:
+  - `pretest` rebuilds, so bare `npm test` can no longer pass against a stale bundle (re-proved: the
+    same no-op `clearInner` that used to read 37/0 now reads 36/1).
+  - `check:dist` rebuilds into a temp dir and `cmp`s twice: against `dist/` as it stands, which after
+    a build proves byte-reproducibility, and against **`git show HEAD:dist/`**, which proves the
+    committed artifact is a build of the committed source. The second check is the one that protects
+    the vendoring contract, and it needs to be explicit: `pretest` rebuilds `dist/` before the
+    comparison, so without it `verify` would silently *repair* a stale committed bundle instead of
+    failing on it. It is skipped while `src/` differs from HEAD, so it never fires mid-edit.
+  - The suite is now **mutation-tested**: mutations covering gutted `node`/`text`, a deleted
+    `booleanAttributes` entry, a case-sensitive lookup, `cssText` swapped for an additive
+    `setProperty` merge, a removed `finally`, releasing the stash to the previous parent instead of
+    `null`, and one per v0.2.1 fix are each killed by a **named** failing test. Re-run them before
+    trusting a green suite again, and check WHICH test killed each one: a mutation that fails
+    `typecheck` or the build is not a kill, and that mistake was made in both this repo's own
+    mutation runs. Scripts: `~/.claude/research/cdom-audit-2026-08-20/raw/mutate*.py`.
+  What the gate still does not cover: anything needing a real browser (focus, paint, keyboard
+  activation, `xlink:href` rendering), and cas's own call sites. `npm run verify` green means the
+  library does what its tests say, not that a cas page works.
 - The version banner lives only in the `/*! ... */` block atop `src/cdom.ts`; terser preserves it
-  into the minified output, and `test/vendoring.test.mjs` asserts it survived. Bump it in the source,
-  never in `dist/`.
+  into the minified output, and `test/vendoring.test.mjs` asserts it survived **and that it matches
+  `package.json`'s version**, which nothing checked before v0.2.1: the old assertion was
+  `/CDOM v\d+\.\d+\.\d+/` and matched any version at all. Bump it in the source, never in `dist/`.
 - Source style is hard tabs.
 
 ## Architecture: one module-global `currentNode`
@@ -109,25 +129,35 @@ npm run typecheck   # tsc --noEmit
 ## Measured semantics
 
 Probed against the shipped bundle under jsdom, not read off the source. Every row is asserted in
-`test/semantics.test.mjs`.
+`test/semantics.test.mjs`. **This table is v0.2.1; cas vendors v0.2.0 until the bundle is copied
+across**, so the rows marked *new in 0.2.1* are not yet true of what a cas page loads.
 
 | Case | Result |
 |---|---|
 | top-level `div(...)` | returns element, `parentNode === null` |
-| `style: "color:red"` | written to `el.style.cssText`, replacing the whole inline style |
+| `style: "color:red"` | written to `el.style.cssText`, replacing the whole inline style. A non-string **throws** *(new in 0.2.1; an object used to coerce to `[object Object]` and leave the style empty)* |
 | `hidden: true` / `disabled: false` | `hidden="true"` / attribute removed (the `booleanAttributes` list) |
 | `title: null` or `undefined` | attribute **removed** |
 | `href: null` / `src: undefined` | attribute **removed**, so an anchor stops matching `a[href]`, stops being focusable, and loses link styling. This has live cas surfaces (navbar and homepage tiles) |
 | `value` / `checked` | set as JS properties when the element has one, else as attributes (property names beat the boolean-attribute list) |
+| `value: null` on `<li>` | attribute **removed**, ordinal stays auto-numbered *(new in 0.2.1; the property path used to write `value="0"` and pin it)* |
+| `value: null` on `<option>` | attribute **removed** *(new in 0.2.1)*, so the option falls back to submitting its own text where it used to submit `""`. Latent: no cas call site builds a placeholder that way, and passing `""` explicitly is unchanged. `<progress>` likewise flips from a determinate zero bar to an indeterminate one |
+| `indeterminate: true` | sets the **property** *(new in 0.2.1; it was attribute-only and a silent no-op, which cas hand-works-around in `prebuy_utils/classifications_picker.js`)*. Same for `defaultChecked` / `defaultMuted` / `defaultSelected` |
+| `enabled: false` | plain attribute `enabled="false"` *(new in 0.2.1; it was a listed boolean attribute, so it did nothing at all, and it is neither an HTML attribute nor a property)* |
+| `className: "a b"` | writes `class` *(new in 0.2.1; it wrote the inert `classname`, which is why cas carries two translation shims)* |
+| `"xlink:href": "#i"` | `setAttributeNS` into the XLink namespace *(new in 0.2.1; plain `setAttribute` left it in no namespace, where a renderer ignores it)*. **Browser-unverified** |
 | `checked: true` serialization | **no `checked` in `outerHTML`, and `defaultChecked` stays false**, so a re-parse of the markup and `form.reset()` both come back unchecked. `.checked`, `:checked` and `cloneNode` are unaffected |
 | `href: null` on an anchor | attribute removed, so the anchor is no longer focusable or keyboard-activatable |
 | `div(null)` / `div(undefined)` | empty div |
+| `div(undefined, fn)` | same as `div(null, fn)` *(new in 0.2.1; it used to throw, which bites anyone building attrs conditionally)* |
 | `div(0)` / `div(false)` | render as text `0` / `false` |
 | `div(someNode)` | the node is appended as content |
 | `div([])` | empty container |
 | `div([a, b])` | throws; pass a callback that creates each child |
 | `onClick: fn` | `addEventListener("click", fn)`; `null`/`undefined` listeners are skipped |
-| `onclick: "alert(1)"` | throws `Got non-function for "onclick"` |
+| `onclick: "alert(1)"` | throws `Got non-function for "onclick"`. cdom never writes an inline handler attribute |
+| `online: "yes"` / `once: true` | ordinary attributes *(new in 0.2.1; a bare `startsWith("on")` routed them to `addEventListener` and threw)*. These two are an explicit carve-out list, `nonEventOnAttributes`. **Any other `on*` name with a non-function value throws**, whatever the DOM implementation in hand knows about it |
+| `ONCLICK: "alert(1)"` | throws, and `ONCLICK: fn` attaches a listener *(new in 0.2.1)*. The gate is case-insensitive now; it was not, so an upper-case handler name fell through to `setAttribute` and HTML lowercased it into a **live inline handler**, while the function form threw. Wrong in both directions, and pre-existing |
 | `title: () => {}` | throws `Got function for "title"` |
 | `cdom.html(str)` | `<template>` parse then append, returns the fragment, **no sanitization**: trusted input only |
 
@@ -161,6 +191,12 @@ has already restored `currentNode` before the continuation runs. Nodes created a
   documented top-level idiom. A global "is any async render in flight" flag fires on correct code
   every time a page builds a detached element while any fetch is outstanding. Do not rebuild it
   without a per-frame mechanism.
+- **A stashed promise nobody awaits rejects in silence.** Observing settlement is what marks the
+  rejection handled, so this cannot be fixed from inside cdom: returning a derived promise would
+  restore the report and break the stash, because the release microtask would then run before the
+  caller's continuation instead of after it. Await the returned promise, or attach your own `.catch`.
+  Pinned out of process by `test/fixtures/fire-and-forget-rejection.mjs`. The one cas call site
+  shaped like this is `db_maint.js`'s fire-and-forget `EditDatabase`.
 - **Nothing may attach a handler to an `inner` callback's promise.** Doing so marks its rejection
   handled, and an async render that throws then fails silently instead of surfacing through
   `unhandledrejection`. `test/fixtures/throwing-render.mjs` guards this out of process, because

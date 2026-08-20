@@ -1,6 +1,6 @@
 {
 	"name": "cdom",
-	"version": "0.2.0",
+	"version": "0.2.1",
 	"description": "Build DOM trees from nested closures.",
 	"type": "module",
 	"main": "dist/cdom.min.js",
@@ -9,9 +9,11 @@
 	"private": true,
 	"scripts": {
 		"build": "./build.sh",
-		"typecheck": "tsc --noEmit --project tsconfig.production.json",
+		"typecheck": "node_modules/.bin/tsc --noEmit --project tsconfig.production.json",
+		"pretest": "npm run build",
 		"test": "node --test test/*.test.mjs",
-		"verify": "npm run typecheck && npm run build && npm test"
+		"check:dist": "./check-dist.sh",
+		"verify": "npm run typecheck && npm test && npm run check:dist"
 	},
 	"devDependencies": {
 		"jsdom": "26.1.0",

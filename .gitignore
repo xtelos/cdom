@@ -1,7 +1,7 @@
 built
 node_modules
 
-# tsc intermediates; only dist/cdom.min.js is committed
+# tsc intermediates. dist/cdom.min.js and dist/cdom.d.ts are committed: the bundle is
+# what cas vendors, and the declarations are what package.json's "types" field points at.
 dist/cdom.js
 dist/cdom.js.map
-dist/cdom.d.ts
