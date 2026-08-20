@@ -1,5 +1,5 @@
 /*!
- * CDOM v0.2.0 (https://github.com/AmbroseCavalier/cdom)
+ * CDOM v0.2.1 (https://github.com/AmbroseCavalier/cdom)
  *
  * Copyright 2021 Ambrose Cavalier
  * Licensed under the MIT (https://github.com/AmbroseCavalier/cdom/blob/master/LICENSE)
@@ -13,16 +13,34 @@ type Primitive = string | number | boolean | undefined | null;
 type PrimitiveOrEventListener = Primitive | ((evt: Event) => void);
 type AttrMap = Record<string, PrimitiveOrEventListener>;
 
+const XLINK_NAMESPACE = "http://www.w3.org/1999/xlink";
+
 /**
- * Names set as live JS properties rather than attributes. These take precedence over
- * `booleanAttributes`: "checked" appears in both lists, and the attribute branch used
- * to shadow it, so `checked` was only ever written as an attribute.
+ * Names set as live JS properties rather than attributes, when the element in hand
+ * actually has the property. These take precedence over `booleanAttributes`: "checked"
+ * appears in both lists, and the attribute branch used to shadow it, so `checked` was
+ * only ever written as an attribute.
+ *
+ * The other four are property-ONLY in HTML. `indeterminate` in particular sat in
+ * `booleanAttributes` alone, which made it a silent no-op: cas hand-works-around it in
+ * prebuy_utils/classifications_picker.js. They stay listed as boolean attributes too,
+ * as the fallback for an element that has no such property.
  */
-const booleanProperties = ["checked"];
+const booleanProperties = [
+	"checked",
+	"indeterminate",
+	"defaultChecked",
+	"defaultMuted",
+	"defaultSelected"
+];
 const stringProperties = ["value"];
 
 // from https://github.com/kangax/html-minifier/blob/gh-pages/src/htmlminifier.js#L202
-const booleanAttributes = [
+// A Set for clarity, not for speed: at cas scale the lookup cost is unmeasurable
+// against the per-element budget, and claiming otherwise would be a false perf win.
+// "enabled" was dropped in v0.2.1: it is neither an HTML attribute nor a property, so
+// it was a silent no-op that reads like it disables something.
+const booleanAttributes = new Set([
 	"allowfullscreen",
 	"async",
 	"autofocus",
@@ -37,7 +55,6 @@ const booleanAttributes = [
 	"defaultselected",
 	"defer",
 	"disabled",
-	"enabled",
 	"formnovalidate",
 	"hidden",
 	"indeterminate",
@@ -64,22 +81,46 @@ const booleanAttributes = [
 	"truespeed",
 	"typemustmatch",
 	"visible"
-];
+]);
 
 function setAttrOrProp(el: SVGElement | HTMLElement, name: string, val: Primitive) {
-	if (booleanProperties.includes(name) && name in el) {
+	if (name === "className") {
+		// `className` is the JS property name; as an attribute it lowercases to the
+		// inert `classname`. cas carried two independent translation shims for this.
+		name = "class";
+	}
+
+	if (val === null || val === undefined) {
+		// An absent value removes the attribute. Writing `name=""` instead would make
+		// the element match presence selectors like `[title]`.
+		//
+		// This runs BEFORE the property branches, which it did not until v0.2.1:
+		// `el.value = ""` on an <li> writes value="0" and pins the ordinal, where
+		// removing the attribute leaves it auto-numbered. removeAttribute matches on
+		// qualified name, so it clears a namespaced `xlink:href` too.
+		el.removeAttribute(name);
+	} else if (booleanProperties.includes(name) && name in el) {
 		// @ts-ignore
 		el[name] = !!val;
 	} else if (stringProperties.includes(name) && name in el) {
 		// @ts-ignore
-		el[name] = val ?? "";
-	} else if (val === null || val === undefined) {
-		// An absent value removes the attribute. Writing `name=""` instead would make
-		// the element match presence selectors like `[title]`.
-		el.removeAttribute(name);
+		el[name] = val;
 	} else if (name === "style") {
-		el.style.cssText = val.toString();
-	} else if (booleanAttributes.includes(name.toLowerCase())) {
+		if (typeof val !== "string") {
+			// An object silently coerced to "[object Object]", which parses to nothing:
+			// the whole inline style vanished. Mirrors the guard on function values.
+			throw new Error(
+				`Got ${typeof val} for "style". Pass a CSS string, e.g. style: "color: red".`
+			);
+		}
+		// The whole inline style, parsed by CSSOM. Not a merge, and not a list of
+		// ";"-separated pairs: a semicolon is legal inside a url().
+		el.style.cssText = val;
+	} else if (name.startsWith("xlink:")) {
+		// SVG's xlink:href only works from its own namespace; plain setAttribute puts
+		// it in no namespace at all, where a renderer ignores it.
+		el.setAttributeNS(XLINK_NAMESPACE, name, val.toString());
+	} else if (booleanAttributes.has(name.toLowerCase())) {
 		if (val) {
 			el.setAttribute(name, "true");
 		} else {
@@ -88,6 +129,17 @@ function setAttrOrProp(el: SVGElement | HTMLElement, name: string, val: Primitiv
 	} else {
 		el.setAttribute(name, val.toString());
 	}
+}
+
+/**
+ * True for a name the DOM itself recognises as an event handler (`onclick`, `oninput`).
+ *
+ * A bare `startsWith("on")` also caught `online` and `once`, which are ordinary
+ * attributes, and threw on them. Every valid event-handler content attribute has a
+ * matching IDL property on the element, so asking the element is the honest test.
+ */
+function isEventHandlerName(el: SVGElement | HTMLElement, name: string): boolean {
+	return name.toLowerCase() in el;
 }
 
 function createElementFromParams(
@@ -106,17 +158,22 @@ function createElementFromParams(
 	if (attrs) {
 		for (const attributeName in attrs) {
 			const val = attrs[attributeName];
-			if (attributeName.startsWith("on")) {
-				if (val === null || val === undefined) {
-					continue
+			if (typeof val === "function") {
+				if (!attributeName.startsWith("on")) {
+					throw new Error(`Got function for "${attributeName}".`);
 				}
-				if (typeof val !== "function") {
-					throw new Error(`Got non-function for "${attributeName}".`);
-				}
+				// A function under an on* name is a listener, including for a custom
+				// event the DOM has never heard of.
 				//@ts-ignore
 				el.addEventListener(attributeName.substring(2).toLowerCase(), val);
-			} else if (typeof val === "function") {
-				throw new Error(`Got function for "${attributeName}".`);
+			} else if (attributeName.startsWith("on") && isEventHandlerName(el, attributeName)) {
+				if (val !== null && val !== undefined) {
+					// `onclick: "alert(1)"` is a bug, not markup. cdom has never written
+					// an inline handler attribute and must not start.
+					throw new Error(`Got non-function for "${attributeName}".`);
+				}
+				// A null listener is nothing to attach, and there is nothing to remove
+				// from an element this call just created.
 			} else {
 				setAttrOrProp(el, attributeName, val);
 			}
@@ -221,8 +278,10 @@ function makeElementProxy<N>(namespace: ElementNamespace) {
 					// is content, not attributes, even though both are `typeof "object"`.
 					return isAttrMap(a) ? create(a, null) : create(null, a);
 				}
-				if (a === null || isAttrMap(a)) {
-					return create(a, b);
+				if (a === null || a === undefined || isAttrMap(a)) {
+					// `undefined` too: building attrs conditionally is normal, and
+					// div(undefined, fn) threw where div(null, fn) worked.
+					return create(a ?? null, b);
 				}
 				throw new Error(
 					`Expected an attribute map as the first of two arguments to <${tagName as string}>, got ${
@@ -290,6 +349,12 @@ export function stashStatePromise<T>(promise: Promise<T>): Promise<T> {
 	};
 	// `then(release, release)` rather than `finally`, so the derived promise settles
 	// here. The caller still awaits the original promise and sees it reject.
+	//
+	// The cost, which is inherent: observing settlement marks the rejection handled, so
+	// a stashed promise NOBODY awaits rejects in silence. Returning a derived promise
+	// would restore the report and break the stash, because the release microtask would
+	// then run before the caller's continuation instead of after it. Await the returned
+	// promise, or attach your own .catch. Pinned by test/fixtures/fire-and-forget-rejection.mjs.
 	promise.then(release, release);
 	return promise;
 }
