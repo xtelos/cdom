@@ -87,13 +87,19 @@ npm run typecheck   # tsc --noEmit, from node_modules/.bin, never a global tsc
   a `src/cdom.ts` edit was validated against the **stale** `dist/`. Both are closed:
   - `pretest` rebuilds, so bare `npm test` can no longer pass against a stale bundle (re-proved: the
     same no-op `clearInner` that used to read 37/0 now reads 36/1).
-  - `check:dist` rebuilds into a temp dir and `cmp`s against the committed `dist/`. Run after a build
-    it proves byte-reproducibility; run on a clean checkout it proves the committed artifact is what
-    the source actually builds to. Both directions were verified by hand.
-  - The suite is now **mutation-tested**: 12 mutations (gutted `node`/`text`, a deleted
-    `booleanAttributes` entry, `cssText` swapped for an additive `setProperty` merge, a removed
-    `finally`, releasing the stash to the previous parent instead of `null`, and one per v0.2.1 fix)
-    are each killed by a named failing test. Re-run them before trusting a green suite again.
+  - `check:dist` rebuilds into a temp dir and `cmp`s twice: against `dist/` as it stands, which after
+    a build proves byte-reproducibility, and against **`git show HEAD:dist/`**, which proves the
+    committed artifact is a build of the committed source. The second check is the one that protects
+    the vendoring contract, and it needs to be explicit: `pretest` rebuilds `dist/` before the
+    comparison, so without it `verify` would silently *repair* a stale committed bundle instead of
+    failing on it. It is skipped while `src/` differs from HEAD, so it never fires mid-edit.
+  - The suite is now **mutation-tested**: mutations covering gutted `node`/`text`, a deleted
+    `booleanAttributes` entry, a case-sensitive lookup, `cssText` swapped for an additive
+    `setProperty` merge, a removed `finally`, releasing the stash to the previous parent instead of
+    `null`, and one per v0.2.1 fix are each killed by a **named** failing test. Re-run them before
+    trusting a green suite again, and check WHICH test killed each one: a mutation that fails
+    `typecheck` or the build is not a kill, and that mistake was made in both this repo's own
+    mutation runs. Scripts: `~/.claude/research/cdom-audit-2026-08-20/raw/mutate*.py`.
   What the gate still does not cover: anything needing a real browser (focus, paint, keyboard
   activation, `xlink:href` rendering), and cas's own call sites. `npm run verify` green means the
   library does what its tests say, not that a cas page works.
@@ -135,6 +141,7 @@ across**, so the rows marked *new in 0.2.1* are not yet true of what a cas page 
 | `href: null` / `src: undefined` | attribute **removed**, so an anchor stops matching `a[href]`, stops being focusable, and loses link styling. This has live cas surfaces (navbar and homepage tiles) |
 | `value` / `checked` | set as JS properties when the element has one, else as attributes (property names beat the boolean-attribute list) |
 | `value: null` on `<li>` | attribute **removed**, ordinal stays auto-numbered *(new in 0.2.1; the property path used to write `value="0"` and pin it)* |
+| `value: null` on `<option>` | attribute **removed** *(new in 0.2.1)*, so the option falls back to submitting its own text where it used to submit `""`. Latent: no cas call site builds a placeholder that way, and passing `""` explicitly is unchanged. `<progress>` likewise flips from a determinate zero bar to an indeterminate one |
 | `indeterminate: true` | sets the **property** *(new in 0.2.1; it was attribute-only and a silent no-op, which cas hand-works-around in `prebuy_utils/classifications_picker.js`)*. Same for `defaultChecked` / `defaultMuted` / `defaultSelected` |
 | `enabled: false` | plain attribute `enabled="false"` *(new in 0.2.1; it was a listed boolean attribute, so it did nothing at all, and it is neither an HTML attribute nor a property)* |
 | `className: "a b"` | writes `class` *(new in 0.2.1; it wrote the inert `classname`, which is why cas carries two translation shims)* |
@@ -149,7 +156,8 @@ across**, so the rows marked *new in 0.2.1* are not yet true of what a cas page 
 | `div([a, b])` | throws; pass a callback that creates each child |
 | `onClick: fn` | `addEventListener("click", fn)`; `null`/`undefined` listeners are skipped |
 | `onclick: "alert(1)"` | throws `Got non-function for "onclick"`. cdom never writes an inline handler attribute |
-| `online: "yes"` / `once: true` | ordinary attributes *(new in 0.2.1; a bare `startsWith("on")` routed them to `addEventListener` and threw)*. A name counts as a handler only if the element has the matching IDL property; a **function** under any `on*` name is always a listener, custom events included |
+| `online: "yes"` / `once: true` | ordinary attributes *(new in 0.2.1; a bare `startsWith("on")` routed them to `addEventListener` and threw)*. These two are an explicit carve-out list, `nonEventOnAttributes`. **Any other `on*` name with a non-function value throws**, whatever the DOM implementation in hand knows about it |
+| `ONCLICK: "alert(1)"` | throws, and `ONCLICK: fn` attaches a listener *(new in 0.2.1)*. The gate is case-insensitive now; it was not, so an upper-case handler name fell through to `setAttribute` and HTML lowercased it into a **live inline handler**, while the function form threw. Wrong in both directions, and pre-existing |
 | `title: () => {}` | throws `Got function for "title"` |
 | `cdom.html(str)` | `<template>` parse then append, returns the fragment, **no sanitization**: trusted input only |
 

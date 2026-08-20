@@ -132,15 +132,17 @@ function setAttrOrProp(el: SVGElement | HTMLElement, name: string, val: Primitiv
 }
 
 /**
- * True for a name the DOM itself recognises as an event handler (`onclick`, `oninput`).
+ * Names that start with "on" and are NOT event handlers. HTML has no such attribute;
+ * both of these are borrowed from adjacent APIs (`once` is an addEventListener option,
+ * `online` is a navigator property) and are the two an author actually reaches for.
  *
- * A bare `startsWith("on")` also caught `online` and `once`, which are ordinary
- * attributes, and threw on them. Every valid event-handler content attribute has a
- * matching IDL property on the element, so asking the element is the honest test.
+ * This is a carve-out list rather than a test against the element, deliberately. Asking
+ * `name in el` sounds more honest and is worse: jsdom has no `onanimationend`,
+ * `ontransitionend`, `onpointerdown`, `onfocusin` or `ongotpointercapture`, so the same
+ * attribute map would write an inline handler attribute under a test runner and throw in
+ * a browser. An unknown on* name has to default to throwing, not to writing.
  */
-function isEventHandlerName(el: SVGElement | HTMLElement, name: string): boolean {
-	return name.toLowerCase() in el;
-}
+const nonEventOnAttributes = new Set(["once", "online"]);
 
 function createElementFromParams(
 	tagName: string,
@@ -158,19 +160,29 @@ function createElementFromParams(
 	if (attrs) {
 		for (const attributeName in attrs) {
 			const val = attrs[attributeName];
+			// Lowercase for the decision, never for the write. HTML lowercases an
+			// attribute name on the way in, so a gate on the raw name let `ONCLICK`
+			// past both branches and straight into setAttribute, where it became a live
+			// inline handler; `ONCLICK: fn` meanwhile threw. Both directions were wrong.
+			const lowerName = attributeName.toLowerCase();
+			const isOnName = lowerName.startsWith("on") && !nonEventOnAttributes.has(lowerName);
 			if (typeof val === "function") {
-				if (!attributeName.startsWith("on")) {
+				if (!isOnName) {
 					throw new Error(`Got function for "${attributeName}".`);
 				}
 				// A function under an on* name is a listener, including for a custom
 				// event the DOM has never heard of.
 				//@ts-ignore
-				el.addEventListener(attributeName.substring(2).toLowerCase(), val);
-			} else if (attributeName.startsWith("on") && isEventHandlerName(el, attributeName)) {
+				el.addEventListener(lowerName.substring(2), val);
+			} else if (isOnName) {
 				if (val !== null && val !== undefined) {
 					// `onclick: "alert(1)"` is a bug, not markup. cdom has never written
-					// an inline handler attribute and must not start.
-					throw new Error(`Got non-function for "${attributeName}".`);
+					// an inline handler attribute and must not start. An on* name that
+					// is not a handler belongs in `nonEventOnAttributes`, above.
+					throw new Error(
+						`Got non-function for "${attributeName}". Event handlers take a function; ` +
+							`if this is not an event handler, it needs adding to nonEventOnAttributes.`
+					);
 				}
 				// A null listener is nothing to attach, and there is nothing to remove
 				// from an element this call just created.
@@ -351,10 +363,14 @@ export function stashStatePromise<T>(promise: Promise<T>): Promise<T> {
 	// here. The caller still awaits the original promise and sees it reject.
 	//
 	// The cost, which is inherent: observing settlement marks the rejection handled, so
-	// a stashed promise NOBODY awaits rejects in silence. Returning a derived promise
-	// would restore the report and break the stash, because the release microtask would
-	// then run before the caller's continuation instead of after it. Await the returned
-	// promise, or attach your own .catch. Pinned by test/fixtures/fire-and-forget-rejection.mjs.
+	// a stashed promise NOBODY awaits rejects in silence. Both alternatives were built and
+	// measured, and each fails differently. Returning a derived promise breaks the stash,
+	// because the release microtask then runs before the caller's continuation instead of
+	// after it. Rethrowing (`then(release, e => { release(); throw e; })`) keeps every
+	// async invariant and does restore the report, but fires a SPURIOUS unhandled
+	// rejection every time a caller handles the error properly, which is all 24 cas sites.
+	// Await the returned promise, or attach your own .catch.
+	// Pinned by test/fixtures/fire-and-forget-rejection.mjs.
 	promise.then(release, release);
 	return promise;
 }

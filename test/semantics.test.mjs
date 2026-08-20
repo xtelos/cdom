@@ -285,10 +285,24 @@ test("every boolean attribute writes true and removes on false", () => {
 	assert.equal(BOOLEAN_ATTRIBUTES.length, 40);
 });
 
+test("the boolean-attribute lookup is case-insensitive", () => {
+	// Every name in the loop above is already lowercase, so dropping the .toLowerCase()
+	// from the lookup passed the whole suite. An upper-case key is what HTML would
+	// lowercase on the way in, so it has to take the same branch.
+	assert.equal(div({ HIDDEN: true }).getAttribute("hidden"), "true");
+	assert.equal(div({ HIDDEN: false }).hasAttribute("hidden"), false);
+	assert.equal(div({ Disabled: false }).hasAttribute("disabled"), false);
+});
+
 test("a name outside the list keeps its literal value", () => {
 	// The counterpart to the loop above: "false" as a *string* is exactly what the DOM
-	// does with an unknown attribute, and is why the list has to be explicit.
+	// does with an unknown attribute, and is why the list has to be explicit. Naming
+	// several is the only guard against a name being ADDED to the list; the length
+	// assertion above pins this file's copy, not the source's.
 	assert.equal(div({ contenteditable: false }).getAttribute("contenteditable"), "false");
+	assert.equal(div({ draggable: false }).getAttribute("draggable"), "false");
+	assert.equal(div({ spellcheck: false }).getAttribute("spellcheck"), "false");
+	assert.equal(div({ translate: false }).getAttribute("translate"), "false");
 	// `enabled` was in the list and is not an HTML attribute or property at all, so it
 	// was a silent no-op. Removed in v0.2.1: junk you can see beats a no-op you cannot.
 	assert.equal(div({ enabled: false }).getAttribute("enabled"), "false");
@@ -394,4 +408,66 @@ test("undefined is accepted as the first of two arguments", () => {
 	// A Node or a primitive first is still an error worth naming.
 	assert.throws(() => div(dom.window.document.createTextNode("x"), () => {}), /Node/);
 	assert.throws(() => div("str", () => {}), /string/);
+});
+
+/* ------------------------------------------------------------------------- *
+ * Adversarial review of the v0.2.1 diff, 2026-08-20. Every case below was
+ * measured against both the v0.2.0 and the v0.2.1 bundle before being written.
+ * ------------------------------------------------------------------------- */
+
+test("an event-handler name is recognised whatever its case", () => {
+	// The gate was `attributeName.startsWith("on")` while the handler test lowercased,
+	// so an upper-case name fell through BOTH branches into setAttribute. HTML then
+	// lowercased it on the way in, which made ONCLICK: "alert(1)" a live inline
+	// handler. The mirror image was just as wrong: ONCLICK: fn threw.
+	assert.throws(() => div({ ONCLICK: "alert(1)" }), /non-function/);
+	assert.throws(() => div({ OnClick: "alert(1)" }), /non-function/);
+	assert.equal(div({ ONCLICK: null }).hasAttribute("onclick"), false);
+
+	for (const name of ["ONCLICK", "OnClick", "onClick", "onclick"]) {
+		let hits = 0;
+		const el = div({ [name]: () => hits++ });
+		el.dispatchEvent(new dom.window.Event("click"));
+		assert.equal(hits, 1, `${name} must attach a listener`);
+		assert.equal(el.hasAttribute("onclick"), false, `${name} must not write an attribute`);
+	}
+});
+
+test("an unrecognised on* name throws rather than becoming an attribute", () => {
+	// These are real handlers in a browser and absent from jsdom's element prototypes.
+	// Deciding by `name in el` made cdom write an inline handler attribute under a test
+	// runner for input that is a hard error in production, which is the wrong direction
+	// for a test environment to differ in. An unknown on* name defaults to throwing.
+	for (const name of [
+		"onanimationend",
+		"ontransitionend",
+		"onpointerdown",
+		"onfocusin",
+		"ongotpointercapture",
+		"onwhateverisnext"
+	]) {
+		assert.throws(() => div({ [name]: "alert(1)" }), /non-function/, name);
+		assert.equal(div({ [name]: null }).hasAttribute(name), false, name);
+	}
+
+	// The carve-out stays: these two are the on-prefixed names that are not handlers.
+	assert.equal(div({ online: "yes" }).getAttribute("online"), "yes");
+	assert.equal(input({ once: true }).getAttribute("once"), "true");
+	assert.equal(div({ ONLINE: "yes" }).getAttribute("online"), "yes");
+});
+
+test("an absent value changes <option> and <progress> too, not just <li>", () => {
+	// The reordering that fixed <li> reaches every element with a `value` property.
+	// The <option> row is the one to watch: a placeholder built as option({value: x})
+	// with x null now submits its own label instead of "". No cas call site does this,
+	// and passing "" explicitly is unchanged, but it is the shape of bug that gets
+	// diagnosed as a backend problem.
+	const opt = cdom.elements.option({ value: null }, "Any");
+	assert.equal(opt.outerHTML, "<option>Any</option>");
+	assert.equal(opt.value, "Any", "with no value attribute, <option> falls back to its text");
+	assert.equal(cdom.elements.option({ value: "" }, "Any").value, "");
+
+	// <progress> flips from a determinate zero bar to an animated indeterminate one.
+	assert.equal(cdom.elements.progress({ value: null }).hasAttribute("value"), false);
+	assert.equal(cdom.elements.progress({ value: 0 }).getAttribute("value"), "0");
 });
